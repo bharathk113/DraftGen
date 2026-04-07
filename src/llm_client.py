@@ -3,12 +3,15 @@ import json
 import logging
 import base64
 from pathlib import Path
+from typing import Optional
+
+import httpx
 from PIL import Image
 from image_handler import ImageHandler
 
 
 class LLMClient:
-    def __init__(self, model_name: str | None = None, hf_token: str | None = None, backend: str = "auto"):
+    def __init__(self, model_name: Optional[str] = None, hf_token: Optional[str] = None, backend: str = "auto"):
         self.model_name = model_name or os.getenv("MODEL_NAME")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.google_api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -39,10 +42,34 @@ class LLMClient:
                 import openai
             except ImportError as exc:
                 raise ImportError("openai package is required for OPENAI_API_KEY usage") from exc
-            openai.api_key = self.openai_api_key
+
+            verify_setting = os.getenv("OPENAI_VERIFY_SSL", "true").strip().lower()
+            if verify_setting in {"0", "false", "no"}:
+                verify = False
+            else:
+                verify = os.getenv("OPENAI_CA_BUNDLE") or True
+
+            trust_env_setting = os.getenv("OPENAI_TRUST_ENV", "true").strip().lower()
+            trust_env = trust_env_setting not in {"0", "false", "no"}
+
+            proxy_url = os.getenv("OPENAI_PROXY_URL")
+            proxy = proxy_url if proxy_url else None
+
+            self.openai_module = openai
+            self.openai_verify = verify
+            self.openai_trust_env = trust_env
+            self.openai_proxy = proxy
+            self.openai_allow_insecure_fallback = verify_setting not in {"0", "false", "no"}
+
+            http_client = httpx.Client(verify=verify, trust_env=trust_env, proxy=proxy)
             self.backend = "openai"
-            self.client = openai
-            logging.info("Using OpenAI-compatible backend")
+            self.client = openai.OpenAI(api_key=self.openai_api_key, http_client=http_client)
+            logging.info(
+                "Using OpenAI-compatible backend (trust_env=%s, proxy=%s, verify=%s)",
+                trust_env,
+                bool(proxy_url),
+                verify is not False,
+            )
             return
 
         if self.backend_preference in {"transformers", "auto"} and self.model_name:
@@ -68,6 +95,53 @@ class LLMClient:
         raise RuntimeError(
             "No LLM backend configured. Set GOOGLE_API_KEY, OPENAI_API_KEY, or MODEL_NAME with HUGGINGFACE_API_TOKEN."
         )
+
+    def _should_openai_retry(self, exc):
+        if self.backend != "openai" or not self.openai_allow_insecure_fallback or self.openai_verify is False:
+            return False
+
+        connection_error_types = (self.openai_module.APIConnectionError, httpx.ConnectError, httpx.TransportError)
+        return isinstance(exc, connection_error_types)
+
+    def _should_openai_proxy_fallback(self, exc):
+        if self.backend != "openai" or not self.openai_trust_env:
+            return False
+
+        proxy_error_types = (self.openai_module.APIConnectionError, httpx.ProxyError)
+        if not isinstance(exc, proxy_error_types):
+            return False
+
+        message = str(exc).lower()
+        return "proxy" in message or "proxyerror" in message or "503" in message
+
+    def _rebuild_openai_client(self, verify, trust_env=None, proxy=None):
+        if trust_env is None:
+            trust_env = self.openai_trust_env
+        if proxy is None:
+            proxy = self.openai_proxy
+        http_client = httpx.Client(verify=verify, trust_env=trust_env, proxy=proxy)
+        self.client = self.openai_module.OpenAI(api_key=self.openai_api_key, http_client=http_client)
+        self.openai_verify = verify
+        self.openai_trust_env = trust_env
+        self.openai_proxy = proxy
+        if verify is False:
+            logging.warning("OpenAI client rebuilt with SSL verification disabled")
+        if trust_env is False:
+            logging.warning("OpenAI client rebuilt without trusting environment proxies")
+
+    def _run_openai_request(self, request_func):
+        try:
+            return request_func()
+        except Exception as exc:
+            if self._should_openai_proxy_fallback(exc):
+                logging.warning("OpenAI request failed via proxy, retrying once without environment proxy settings: %s", exc)
+                self._rebuild_openai_client(self.openai_verify, trust_env=False, proxy=None)
+                return request_func()
+            if self._should_openai_retry(exc):
+                logging.warning("OpenAI request failed, retrying once with SSL verification disabled: %s", exc)
+                self._rebuild_openai_client(False)
+                return request_func()
+            raise
 
     def _flatten_google_content(self, content):
         if content is None:
@@ -131,12 +205,12 @@ class LLMClient:
             return self._parse_google_response(data)
 
         if self.backend == "openai":
-            response = self.client.ChatCompletion.create(
+            response = self._run_openai_request(lambda: self.client.chat.completions.create(
                 model=self.model_name or "gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
                 temperature=0.6,
-            )
+            ))
             return response.choices[0].message.content.strip()
 
         if self.backend == "transformers":
@@ -213,10 +287,10 @@ class LLMClient:
             "text": prompt
         })
         
-        response = self.client.ChatCompletion.create(
+        response = self._run_openai_request(lambda: self.client.chat.completions.create(
             model=self.model_name or "gpt-4-vision-preview",
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,
             temperature=0.6,
-        )
+        ))
         return response.choices[0].message.content.strip()

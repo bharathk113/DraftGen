@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "draftgen"
+version = "0.2.0"
+description = "AI-powered document analysis and presentation/report generation tool with vision capabilities"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Bharath Reddy", email = "bharathkadapala@gmail.com"},
+]
+maintainers = [
+    {name = "Bharath Reddy", email = "bharathkadapala@gmail.com"},
+]
+keywords = ["ai", "document-analysis", "presentation", "report", "vision", "llm", "openai", "google-gemini"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Office/Business :: Office Suites",
+]
+dependencies = [
+    "python-docx>=0.8.11",
+    "python-pptx>=0.6.21",
+    "PyPDF2>=3.0.0",
+    "Pillow>=10.0.0",
+    "requests>=2.31.0",
+    "transformers>=4.35.0",
+    "torch>=2.0.0",
+    "openai>=1.0.0",
+    "langchain>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bharathk113/DraftGen"
+Repository = "https://github.com/bharathk113/DraftGen"
+Issues = "https://github.com/bharathk113/DraftGen/issues"
+Changelog = "https://github.com/bharathk113/DraftGen/blob/main/CHANGELOG.md"
+
+[project.scripts]
+draftgen = "src.agent:main"
+
+[tool.setuptools]
+packages = ["src"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+draftgen = ["*.md", "*.txt"]

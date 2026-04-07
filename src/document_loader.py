@@ -1,6 +1,8 @@
 import io
+import logging
 import os
 from pathlib import Path
+from typing import Union, Optional, List
 
 from docx import Document as DocxDocument
 from PIL import Image
@@ -10,7 +12,7 @@ from PyPDF2 import PdfReader
 
 class ExtractedImage:
     """Container for extracted image data with metadata."""
-    def __init__(self, image: Image.Image, source: str, page_or_shape: int | str = None):
+    def __init__(self, image: Image.Image, source: str, page_or_shape: Optional[Union[int, str]] = None):
         self.image = image
         self.source = source  # e.g., "pdf", "docx", "pptx"
         self.page_or_shape = page_or_shape  # page number or shape index
@@ -19,7 +21,22 @@ class ExtractedImage:
     
     def get_description(self) -> str:
         """Get a brief description of the image."""
-        return f"[Image from {self.source}: {self.width}x{self.height}px{f' (page {self.page_or_shape})' if self.page_or_shape else ''}]"
+        desc = f"Image from {self.source}: {self.width}x{self.height}px"
+        if self.page_or_shape:
+            desc += f" (page {self.page_or_shape})"
+        
+        # Try to get OCR text
+        try:
+            from pytesseract import image_to_string
+            text = image_to_string(self.image).strip()
+            if text:
+                desc += f" - OCR: {text[:100]}{'...' if len(text) > 100 else ''}"
+        except ImportError:
+            pass
+        except Exception:
+            pass
+        
+        return desc
 
 
 def describe_image(image: Image.Image) -> str:
@@ -32,39 +49,60 @@ def describe_image(image: Image.Image) -> str:
         return "Image (OCR not available)"
 
 
-def load_text_file(path: Path) -> tuple[str, list[str]]:
+def load_text_file(path: Path) -> tuple[str, List[ExtractedImage]]:
     with path.open("r", encoding="utf-8", errors="ignore") as f:
         return f.read(), []
 
 
-def load_pdf(path: Path) -> tuple[str, list[ExtractedImage]]:
+def load_pdf(path: Path) -> tuple[str, List[ExtractedImage]]:
     text_parts = []
     extracted_images = []
     reader = PdfReader(str(path))
     
+    # First, try standard PDF object extraction
     for page_num, page in enumerate(reader.pages):
         page_text = page.extract_text() or ""
         if page_text:
             text_parts.append(page_text)
         
         # Extract images from PDF
-        if "/XObject" in page["/Resources"]:
-            xobj = page["/Resources"]["/XObject"].get_object()
-            for obj_name in xobj:
-                obj = xobj[obj_name].get_object()
-                if obj["/Subtype"] == "/Image":
+        try:
+            if "/Resources" in page and "/XObject" in page["/Resources"]:
+                xobj = page["/Resources"]["/XObject"].get_object()
+                for obj_name in xobj:
                     try:
-                        data = obj.get_data()
-                        image = Image.open(io.BytesIO(data))
-                        if image.size[0] > 50 and image.size[1] > 50:  # Filter out tiny images
-                            extracted_images.append(ExtractedImage(image, "pdf", page_num + 1))
+                        obj = xobj[obj_name].get_object()
+                        if obj.get("/Subtype") == "/Image":
+                            try:
+                                data = obj.get_data()
+                                image = Image.open(io.BytesIO(data))
+                                if image.size[0] > 50 and image.size[1] > 50:  # Filter out tiny images
+                                    extracted_images.append(ExtractedImage(image, "pdf", page_num + 1))
+                            except Exception as e:
+                                logging.debug("Failed to decode image on page %d: %s", page_num + 1, e)
                     except Exception as e:
-                        pass  # Skip images that can't be decoded
+                        logging.debug("Error processing XObject on page %d: %s", page_num + 1, e)
+        except Exception as e:
+            logging.debug("Error accessing resources on page %d: %s", page_num + 1, e)
+    
+    # If we found no images with standard extraction, try pdf2image for screenshot/scanned PDFs
+    if not extracted_images:
+        try:
+            from pdf2image import convert_from_path
+            logging.info("Using pdf2image to render PDF pages as images (for screenshot-based PDFs)")
+            images = convert_from_path(str(path), first_page=1, last_page=len(reader.pages))
+            for page_num, img in enumerate(images, 1):
+                if img.size[0] > 50 and img.size[1] > 50:
+                    extracted_images.append(ExtractedImage(img, "pdf", page_num))
+        except ImportError:
+            logging.debug("pdf2image not available; cannot render PDF pages as images")
+        except Exception as e:
+            logging.warning("Failed to render PDF with pdf2image: %s (requires poppler-utils)", e)
     
     return "\n\n".join(text_parts), extracted_images
 
 
-def load_docx(path: Path) -> tuple[str, list[ExtractedImage]]:
+def load_docx(path: Path) -> tuple[str, List[ExtractedImage]]:
     doc = DocxDocument(str(path))
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     extracted_images = []
@@ -89,7 +127,7 @@ def load_docx(path: Path) -> tuple[str, list[ExtractedImage]]:
     return "\n\n".join(paragraphs), extracted_images
 
 
-def load_pptx(path: Path) -> tuple[str, list[ExtractedImage]]:
+def load_pptx(path: Path) -> tuple[str, List[ExtractedImage]]:
     prs = PptxPresentation(str(path))
     text_parts = []
     extracted_images = []
@@ -115,7 +153,7 @@ def load_pptx(path: Path) -> tuple[str, list[ExtractedImage]]:
     return "\n\n".join([part for part in text_parts if part.strip()]), extracted_images
 
 
-def load_image(path: Path) -> tuple[str, list[ExtractedImage]]:
+def load_image(path: Path) -> tuple[str, List[ExtractedImage]]:
     try:
         image = Image.open(str(path))
         if image.size[0] > 50 and image.size[1] > 50:  # Only include if reasonably sized
@@ -126,7 +164,7 @@ def load_image(path: Path) -> tuple[str, list[ExtractedImage]]:
         return f"[Image file: {path.name} - could not load]", []
 
 
-def load_document(path: str) -> tuple[str, list[ExtractedImage]]:
+def load_document(path: str) -> tuple[str, List[ExtractedImage]]:
     path_obj = Path(path)
     if path_obj.is_dir():
         documents = []
