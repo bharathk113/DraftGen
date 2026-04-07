@@ -1,57 +1,57 @@
 # DraftGen
 
-DraftGen is a Python CLI that ingests one or more source documents, extracts usable text, and uses an LLM to generate:
+DraftGen is a Python CLI for turning source documents into polished deliverables. It ingests one or more files or folders, extracts text and embedded visuals, and uses an LLM to generate:
 
-- a PowerPoint presentation (`.pptx`)
-- a structured Word report (`.docx`)
-- or both in a single run
+- PowerPoint presentations (`.pptx`)
+- Word reports (`.docx`)
+- both outputs in a single run
 
-The project is designed for lightweight document-to-deliverable workflows and supports common business file formats such as PDF, DOCX, PPTX, Markdown, plain text, JSON, CSV, and image files.
+The project is built for practical document-to-deliverable workflows and supports multimodal generation with vision-capable models, interactive revision, and multiple backend options.
 
-## Features
+## Highlights
 
-- Multi-document input via files or folders
+- Multi-document input from files or folders
 - Support for `pdf`, `docx`, `pptx`, `txt`, `md`, `csv`, `json`, and common image formats
-- **NEW: Direct image ingestion with vision-capable LLMs** - Analyzes charts, graphs, maps, and diagrams directly for accurate context (requires OpenAI GPT-4V/Claude Vision or Google Gemini Vision)
-- Optional OCR-based image text extraction with `pytesseract` (fallback for non-vision backends)
-- PowerPoint generation with optional template support
-- Word report generation from the same source material
-- Pluggable LLM backend selection with vision support:
-  - Google Gemini Vision (supports images)
-  - OpenAI GPT-4 Vision (supports images)
-  - OpenAI-compatible API
-  - local Hugging Face Transformers models (text-only)
+- Direct image ingestion for charts, graphs, diagrams, maps, and other embedded visuals
+- PowerPoint and Word generation from the same source material
+- Interactive review loop for refining generated slides and reports
+- Optional PowerPoint template support
+- Pluggable backend selection across OpenAI, Google Gemini, and local Transformers
+- Graceful fallback to text-only generation when vision is unavailable
 
-## Project Structure
+## How It Works
 
-```text
-.
-├── requirements.txt
-├── src
-│   ├── agent.py
-│   ├── document_loader.py
-│   ├── image_handler.py
-│   ├── llm_client.py
-│   ├── presentation_builder.py
-│   └── report_builder.py
-└── .env.example
-```
+1. DraftGen loads one or more input documents.
+2. It extracts usable text and any embedded images.
+3. A selected LLM backend generates structured JSON for slides, reports, or both.
+4. DraftGen builds final `.pptx` and `.docx` outputs from that structured content.
+5. If interactive mode is enabled, you can iteratively revise the generated content before export.
+
+## Supported Backends
+
+| Backend | Text Generation | Vision Support | Notes |
+| --- | --- | --- | --- |
+| Google Gemini | Yes | Yes | Good option for multimodal analysis |
+| OpenAI-compatible | Yes | Yes | Supports interactive generation and vision-capable models |
+| Transformers | Yes | No | Local text-only fallback |
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.8+
 - `pip`
-- Optional: Tesseract OCR installed on your system if you want OCR from embedded images
+- Optional: Tesseract OCR if you want legacy OCR-based workflows
 
 ## Installation
 
 ```bash
+git clone https://github.com/bharathk113/DraftGen.git
+cd DraftGen
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-If you plan to use OCR:
+Optional OCR support:
 
 ```bash
 pip install pytesseract
@@ -59,27 +59,26 @@ pip install pytesseract
 
 ## Configuration
 
-Copy the example environment file if you want a simple starting point:
-
-```bash
-cp .env.example .env
-```
-
-Set only the variables needed for the backend you want to use.
+Set only the credentials required for the backend you plan to use. You can export them directly in your shell or place them in your local environment management workflow.
 
 ### OpenAI-compatible backend
 
 ```bash
 export OPENAI_API_KEY="your_api_key"
-python src/agent.py --input path/to/document.pdf --backend openai --model-name gpt-4o-mini
+python src/agent.py \
+  --input path/to/document.pdf \
+  --backend openai \
+  --model-name gpt-4o-mini
 ```
 
-### Google backend
+### Google Gemini backend
 
 ```bash
 export GOOGLE_API_KEY="your_api_key"
-export GOOGLE_MODEL="gemini-flash-latest"
-python src/agent.py --input path/to/document.pdf --backend google
+export GOOGLE_MODEL="gemini-2.0-flash"
+python src/agent.py \
+  --input path/to/document.pdf \
+  --backend google
 ```
 
 ### Local Transformers backend
@@ -87,10 +86,12 @@ python src/agent.py --input path/to/document.pdf --backend google
 ```bash
 export MODEL_NAME="your-huggingface-model"
 export HUGGINGFACE_API_TOKEN="your_token_if_required"
-python src/agent.py --input path/to/document.pdf --backend transformers
+python src/agent.py \
+  --input path/to/document.pdf \
+  --backend transformers
 ```
 
-## Usage
+## Quick Start
 
 Generate slides:
 
@@ -130,74 +131,57 @@ python src/agent.py \
   --output-ppt output.pptx
 ```
 
-Disable embedded-image OCR/context:
+## Interactive Review
+
+DraftGen supports iterative refinement after the initial generation step.
+
+Use `--interactive` to review generated slides or report sections in the terminal, then provide natural-language revision requests such as:
+
+- reduce the deck to 3 slides
+- add more detail to each slide
+- include 3 relevant images per slide
+- make the report more executive-summary oriented
+
+Example:
 
 ```bash
 python src/agent.py \
   --input path/to/document.pdf \
-  --image-mode off
+  --mode slides \
+  --interactive \
+  --interactive-rounds 3 \
+  --slide-request "Create a presentation for leadership review"
 ```
 
-## Vision-Based Image Analysis (Direct Image Ingestion)
+## Vision-Based Image Analysis
 
-**New Feature**: DraftGen now supports direct image ingestion with vision-capable LLMs for superior analysis of charts, graphs, maps, and visual data.
+DraftGen can analyze embedded visuals directly instead of relying only on OCR. This improves output quality for image-heavy documents such as reports with charts, diagrams, dashboards, or maps.
 
-### How It Works
+### Image mode options
 
-Instead of extracting text from images via OCR, DraftGen:
-1. **Extracts images directly** from PDF, DOCX, and PPTX files
-2. **Sends images to vision-capable LLMs** (Google Gemini Vision, OpenAI GPT-4V, etc.)
-3. **Analyzes visual content** including:
-   - Charts and trend analysis
-   - Maps and geographic data
-   - Diagrams and flowcharts
-   - Tables and data visualizations
-   - Technical drawings
+- `--image-mode auto`: Use vision if the selected backend supports it
+- `--image-mode off`: Ignore images and run in text-only mode
+- `--image-mode ocr`: Legacy compatibility mode; currently behaves like `auto`
 
-### Using Vision-Capable Backends
+### Example: report generation with vision
 
-For best results with image-heavy documents:
-
-**Google Gemini Vision**:
 ```bash
 export GOOGLE_API_KEY="your_api_key"
 export GOOGLE_MODEL="gemini-2.0-flash"
+
 python src/agent.py \
   --input path/to/document_with_charts.pdf \
   --backend google \
-  --mode both \
-  --report-request "Extract data from all charts and graphs, including trends and values"
+  --mode report \
+  --report-request "Extract key trends, comparisons, and supporting visuals"
 ```
 
-**OpenAI GPT-4V**:
-```bash
-export OPENAI_API_KEY="your_api_key"
-python src/agent.py \
-  --input path/to/document_with_charts.pdf \
-  --backend openai \
-  --model-name gpt-4-vision-preview \
-  --mode both
-```
+### Benefits of direct image ingestion
 
-### Image Mode Options
-
-- `--image-mode off`: Ignore all images (text-only mode)
-- `--image-mode auto`: Use vision API if available with the current backend, otherwise fall back to text-only
-- `--image-mode ocr`: Legacy mode - same as `auto` (for backward compatibility)
-
-### Benefits Over OCR
-
-- **Accurate trend analysis**: Identifies slopes, inflection points, and patterns in charts
-- **Spatial understanding**: Comprehends relationships in diagrams and maps
-- **Color and formatting**: Understands visual hierarchy and emphasis
-- **No text loss**: Captures handwritten notes and non-standard fonts
-- **Reduced hallucination**: Vision models provide grounded analysis
-
-### Limitations
-
-- Transformers backend does not support images (uses text-only fallback)
-- Image analysis is more expensive per token than text-only processing
-- Vision-capable models may have higher latency
+- Better interpretation of charts and trend lines
+- Improved understanding of diagrams and spatial relationships
+- Stronger grounding for image-referenced observations
+- Better handling of visual structure than OCR-only workflows
 
 ## CLI Options
 
@@ -214,18 +198,47 @@ Key options exposed by `src/agent.py`:
 - `--backend`: `auto`, `openai`, `google`, or `transformers`
 - `--model-name`: Override model selection for supported backends
 - `--image-mode`: `off`, `ocr`, or `auto`
-- `--interactive`: Enable interactive review after initial generation
+- `--interactive`: Enable interactive revision after initial generation
 - `--interactive-rounds`: Maximum number of interactive revision rounds
 
-## Notes and Limitations
+## Repository Structure
 
-- **PDF image extraction**: Direct image extraction from PDFs is now supported for vision-capable backends.
-- **Vision model costs**: Vision-capable LLMs (GPT-4V, Gemini Vision) process images token-by-token and may be more expensive than text-only models.
-- **OCR** (optional, legacy): Requires `pytesseract` plus system Tesseract installation for text extraction from images when using non-vision backends.
-- Image filtering: Very small images (< 50x50 pixels) are automatically filtered out to reduce processing overhead.
-- The default output files `output.pptx` and `output.docx` are generated artifacts and are ignored by Git.
-- This repository currently does not include automated tests.
+```text
+.
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── DEVELOPMENT.md
+├── README.md
+├── pyproject.toml
+├── requirements.txt
+└── src
+    ├── agent.py
+    ├── document_loader.py
+    ├── image_handler.py
+    ├── llm_client.py
+    ├── presentation_builder.py
+    └── report_builder.py
+```
+
+## Limitations
+
+- Vision support is available only on supported OpenAI-compatible and Google backends.
+- Transformers mode is text-only.
+- Vision-enabled generation can cost more and take longer than text-only runs.
+- Very image-dense documents may require tighter prompts or smaller batches for best results.
+- The repository currently does not include automated tests.
+
+## Documentation
+
+- [Development Guide](DEVELOPMENT.md)
+- [Contributing Guide](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Vision Feature Summary](VISION_FEATURE_SUMMARY.md)
 
 ## Contributing
 
-Small improvements and cleanup contributions are welcome. Please open an issue or pull request with a clear summary of the problem, the proposed change, and any verification steps.
+Contributions are welcome. Please keep changes focused, document behavior changes, and include clear verification steps in pull requests. For contributor workflow and expectations, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+This project is licensed under the terms of the [MIT License](LICENSE).

@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -171,32 +172,54 @@ Return only the revised JSON object. Do not include any explanation outside the 
 """
 
 
+def _extract_json_candidates(raw_text):
+    text = raw_text.strip()
+    if text:
+        yield text
+
+    for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text, re.IGNORECASE):
+        candidate = match.group(1).strip()
+        if candidate:
+            yield candidate
+
+    decoder = json.JSONDecoder()
+    for i, char in enumerate(raw_text):
+        if char not in "[{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(raw_text[i:])
+        except json.JSONDecodeError:
+            continue
+        yield raw_text[i:i + end].strip()
+
+
 def parse_json_output(raw_text):
-    # First, try to extract from ```json code block
-    import re
-    json_match = re.search(r'```json\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
-    if json_match:
+    for candidate in _extract_json_candidates(raw_text):
         try:
-            return json.loads(json_match.group(1))
+            return json.loads(candidate)
         except json.JSONDecodeError:
-            pass
-
-    # Fallback: try the whole text
-    try:
-        return json.loads(raw_text.strip())
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback: find first { to last }
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(raw_text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
+            continue
 
     raise ValueError("Unable to parse JSON response from LLM")
+
+
+def normalize_revision_result(kind, parsed_json):
+    if kind == "slides":
+        if isinstance(parsed_json, list):
+            return parsed_json
+        if isinstance(parsed_json, dict) and isinstance(parsed_json.get("slides"), list):
+            return parsed_json["slides"]
+        raise ValueError("Revised slide JSON must be a list or an object with a `slides` key")
+
+    if isinstance(parsed_json, dict):
+        return parsed_json
+    raise ValueError("Revised report JSON must be an object")
+
+
+def format_json_for_revision(kind, content_json):
+    if kind == "slides":
+        return {"slides": content_json}
+    return content_json
 
 
 def create_image_descriptions(extracted_images):
@@ -222,8 +245,8 @@ def read_multiline_input(prompt_text):
     return "\n".join(lines).strip()
 
 
-def revise_json_with_suggestion(original_json, prompt_template, user_request, suggestion, image_descriptions, extracted_images, llm_client, max_tokens):
-    original_json_text = json.dumps(original_json, indent=2)
+def revise_json_with_suggestion(kind, original_json, prompt_template, user_request, suggestion, image_descriptions, extracted_images, llm_client, max_tokens):
+    original_json_text = json.dumps(format_json_for_revision(kind, original_json), indent=2)
     prompt = prompt_template.format(
         user_request=user_request,
         image_descriptions=image_descriptions,
@@ -235,7 +258,7 @@ def revise_json_with_suggestion(original_json, prompt_template, user_request, su
         result_text = llm_client.generate_with_images(prompt, images_to_send, max_tokens=max_tokens)
     else:
         result_text = llm_client.generate(prompt, max_tokens=max_tokens)
-    return parse_json_output(result_text)
+    return normalize_revision_result(kind, parse_json_output(result_text))
 
 
 def interactive_revision_loop(kind, original_json, user_request, extracted_images, llm_client, max_tokens, max_rounds=3):
@@ -253,28 +276,35 @@ def interactive_revision_loop(kind, original_json, user_request, extracted_image
             print(f"No more suggestions for {kind}. Using current output.")
             break
 
-        if kind == "slides":
-            current_json = revise_json_with_suggestion(
-                current_json,
-                SLIDE_REVISION_PROMPT,
-                user_request,
-                suggestion,
-                image_descriptions,
-                extracted_images,
-                llm_client,
-                max_tokens,
-            )
-        else:
-            current_json = revise_json_with_suggestion(
-                current_json,
-                REPORT_REVISION_PROMPT,
-                user_request,
-                suggestion,
-                image_descriptions,
-                extracted_images,
-                llm_client,
-                max_tokens,
-            )
+        try:
+            if kind == "slides":
+                current_json = revise_json_with_suggestion(
+                    kind,
+                    current_json,
+                    SLIDE_REVISION_PROMPT,
+                    user_request,
+                    suggestion,
+                    image_descriptions,
+                    extracted_images,
+                    llm_client,
+                    max_tokens,
+                )
+            else:
+                current_json = revise_json_with_suggestion(
+                    kind,
+                    current_json,
+                    REPORT_REVISION_PROMPT,
+                    user_request,
+                    suggestion,
+                    image_descriptions,
+                    extracted_images,
+                    llm_client,
+                    max_tokens,
+                )
+        except ValueError as exc:
+            logging.warning("Could not apply interactive revision for %s: %s", kind, exc)
+            print(f"Revision could not be applied for {kind}: {exc}")
+            print("Keeping the current output and continuing.")
 
     return current_json
 
