@@ -214,6 +214,8 @@ Key options exposed by `src/agent.py`:
 - `--backend`: `auto`, `openai`, `google`, or `transformers`
 - `--model-name`: Override model selection for supported backends
 - `--image-mode`: `off`, `ocr`, or `auto`
+- `--interactive`: Enable interactive review after initial generation
+- `--interactive-rounds`: Maximum number of interactive revision rounds
 
 ## Notes and Limitations
 
