@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from document_loader import load_document
+from document_loader import load_document, ExtractedImage
 from llm_client import LLMClient
 from presentation_builder import PresentationBuilder
 from report_builder import ReportBuilder
@@ -14,12 +14,10 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_MAX_SLIDES = 30
 
-SLIDE_PROMPT = """You are a helpful assistant that creates slide outlines from document content.
+SLIDE_PROMPT_TEXT_ONLY = """You are a helpful assistant that creates slide outlines from document content.
 
 Input Document:
 {document_text}
-
-{image_section}
 
 User Request:
 {user_request}
@@ -33,12 +31,29 @@ Ensure `title` is only the slide title and `bullets` are only bullet text.
 Do not include any explanation outside the JSON object.
 """
 
-REPORT_PROMPT = """You are a helpful assistant that writes a structured report from document content.
+SLIDE_PROMPT_WITH_IMAGES = """You are a helpful assistant that creates slide outlines from document content and images.
 
 Input Document:
 {document_text}
 
-{image_section}
+The document also contains {num_images} image(s) including maps, charts, graphs, and diagrams. Please analyze these images carefully to understand trends, relationships, and visual insights they convey.
+
+User Request:
+{user_request}
+
+Generate a JSON object with the key `slides` containing a list of slides. Each slide should include:
+- `title` (a slide heading)
+- `bullets` (a list of short bullet points that incorporate insights from both text and images)
+- optional `notes` (can reference specific findings from the images)
+
+Ensure `title` is only the slide title and `bullets` are only bullet text.
+Do not include any explanation outside the JSON object.
+"""
+
+REPORT_PROMPT_TEXT_ONLY = """You are a helpful assistant that writes a structured report from document content.
+
+Input Document:
+{document_text}
 
 User Request:
 {user_request}
@@ -47,6 +62,24 @@ Generate a JSON object with the keys `title` and `sections`. Each section should
 - `heading`
 - `content` (a paragraph or list of paragraphs)
 
+Do not include any explanation outside the JSON object.
+"""
+
+REPORT_PROMPT_WITH_IMAGES = """You are a helpful assistant that writes a structured report from document content and visual materials.
+
+Input Document:
+{document_text}
+
+The document also contains {num_images} image(s) including maps, charts, graphs, and diagrams. Please analyze these images carefully to extract data points, trends, relationships, and visual insights that complement the text content.
+
+User Request:
+{user_request}
+
+Generate a JSON object with the keys `title` and `sections`. Each section should include:
+- `heading`
+- `content` (a paragraph or list of paragraphs that integrate insights from both text and visual materials)
+
+Ensure all findings from the images are properly incorporated into the report content.
 Do not include any explanation outside the JSON object.
 """
 
@@ -79,10 +112,24 @@ def parse_json_output(raw_text):
     raise ValueError("Unable to parse JSON response from LLM")
 
 
-def build_slides_content(document_text, image_descriptions, user_request, llm_client, max_slides):
-    image_section = f"Embedded images:\n{chr(10).join(image_descriptions)}" if image_descriptions else ""
-    prompt = SLIDE_PROMPT.format(document_text=document_text, image_section=image_section, user_request=user_request)
-    raw = llm_client.generate(prompt, max_tokens=1000000)
+def build_slides_content(document_text, extracted_images, user_request, llm_client, max_slides):
+    if extracted_images and llm_client.backend in {"google", "openai"}:
+        # Use vision API with images
+        images_to_send = [img.image for img in extracted_images]
+        prompt = SLIDE_PROMPT_WITH_IMAGES.format(
+            document_text=document_text,
+            num_images=len(images_to_send),
+            user_request=user_request
+        )
+        logging.info("Using vision API with %d image(s) for slide generation", len(images_to_send))
+        raw = llm_client.generate_with_images(prompt, images_to_send, max_tokens=1000000)
+    else:
+        # Fallback to text-only mode
+        if extracted_images:
+            logging.warning("Vision mode not available for current backend; using text-only mode")
+        prompt = SLIDE_PROMPT_TEXT_ONLY.format(document_text=document_text, user_request=user_request)
+        raw = llm_client.generate(prompt, max_tokens=1000000)
+    
     logging.info("LLM raw slide response:\n%s", raw)
     result = parse_json_output(raw)
     slides = result.get("slides", [])
@@ -92,10 +139,24 @@ def build_slides_content(document_text, image_descriptions, user_request, llm_cl
     return slides
 
 
-def build_report_content(document_text, image_descriptions, user_request, llm_client):
-    image_section = f"Embedded images:\n{chr(10).join(image_descriptions)}" if image_descriptions else ""
-    prompt = REPORT_PROMPT.format(document_text=document_text, image_section=image_section, user_request=user_request)
-    raw = llm_client.generate(prompt, max_tokens=1024)
+def build_report_content(document_text, extracted_images, user_request, llm_client):
+    if extracted_images and llm_client.backend in {"google", "openai"}:
+        # Use vision API with images
+        images_to_send = [img.image for img in extracted_images]
+        prompt = REPORT_PROMPT_WITH_IMAGES.format(
+            document_text=document_text,
+            num_images=len(images_to_send),
+            user_request=user_request
+        )
+        logging.info("Using vision API with %d image(s) for report generation", len(images_to_send))
+        raw = llm_client.generate_with_images(prompt, images_to_send, max_tokens=4096)
+    else:
+        # Fallback to text-only mode
+        if extracted_images:
+            logging.warning("Vision mode not available for current backend; using text-only mode")
+        prompt = REPORT_PROMPT_TEXT_ONLY.format(document_text=document_text, user_request=user_request)
+        raw = llm_client.generate(prompt, max_tokens=4096)
+    
     logging.info("LLM raw report response:\n%s", raw)
     result = parse_json_output(raw)
     return result
@@ -113,7 +174,7 @@ def main():
     parser.add_argument("--max-slides", type=int, default=DEFAULT_MAX_SLIDES, help="Maximum number of slides to generate")
     parser.add_argument("--backend", choices=["auto", "openai", "google", "transformers"], default="auto", help="LLM backend to use")
     parser.add_argument("--model-name", help="Optional model name for the transformer or Google backend")
-    parser.add_argument("--image-mode", choices=["off", "ocr", "auto"], default="auto", help="How to handle embedded images: off (ignore), ocr (extract text), auto (ocr if available)")
+    parser.add_argument("--image-mode", choices=["off", "ocr", "auto"], default="auto", help="How to handle embedded images: off (ignore), auto (use vision API if available), ocr (legacy: same as auto)")
     args = parser.parse_args()
     mode = args.mode
     if mode == "slides" and "--mode" not in sys.argv and any(arg.startswith("--report-request") for arg in sys.argv):
@@ -122,22 +183,32 @@ def main():
 
     input_paths = [Path(p) for p in args.input]
     document_texts = []
-    all_image_descriptions = []
+    all_extracted_images = []
     for input_path in input_paths:
         if not input_path.exists():
             raise FileNotFoundError(f"Input path does not exist: {input_path}")
-        doc_text, img_descs = load_document(str(input_path))
+        doc_text, extracted_imgs = load_document(str(input_path))
         document_texts.append(doc_text)
-        all_image_descriptions.extend(img_descs)
+        all_extracted_images.extend(extracted_imgs)
     document_text = "\n\n".join(document_texts)
-    image_descriptions = all_image_descriptions if args.image_mode != "off" else []
+    
+    # Handle image-mode parameter
+    if args.image_mode == "off":
+        extracted_images = []
+    else:
+        # "auto" or "ocr" both use the extracted images directly
+        # The LLM client will decide whether to use vision API
+        extracted_images = all_extracted_images
+        if extracted_images and args.image_mode == "ocr":
+            logging.info("Image mode 'ocr' is legacy; switching to direct image ingestion with vision API")
+    
     if not document_text.strip():
         raise ValueError("No text content could be extracted from the input document(s)")
 
     llm_client = LLMClient(model_name=args.model_name, backend=args.backend)
 
     if mode in {"slides", "both"}:
-        slides = build_slides_content(document_text, image_descriptions, args.slide_request, llm_client, args.max_slides)
+        slides = build_slides_content(document_text, extracted_images, args.slide_request, llm_client, args.max_slides)
         logging.info("Parsed slides: %s", json.dumps(slides, indent=2))
         builder = PresentationBuilder(template_path=args.template)
         builder.build_from_outline(slides)
@@ -145,7 +216,7 @@ def main():
         logging.info("Generated presentation: %s", args.output_ppt)
 
     if mode in {"report", "both"}:
-        report = build_report_content(document_text, image_descriptions, args.report_request, llm_client)
+        report = build_report_content(document_text, extracted_images, args.report_request, llm_client)
         report_builder = ReportBuilder()
         report_builder.build(report, args.output_docx)
         logging.info("Generated report: %s", args.output_docx)

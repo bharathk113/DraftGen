@@ -1,6 +1,11 @@
 import os
 import json
 import logging
+import base64
+from pathlib import Path
+from PIL import Image
+from image_handler import ImageHandler
+
 
 class LLMClient:
     def __init__(self, model_name: str | None = None, hf_token: str | None = None, backend: str = "auto"):
@@ -141,3 +146,77 @@ class LLMClient:
             raise RuntimeError("Unexpected response from transformers pipeline")
 
         raise RuntimeError("No LLM backend is available")
+
+    def generate_with_images(self, prompt: str, images: list, max_tokens: int = 1024) -> str:
+        """Generate response with images for vision-capable models."""
+        if self.backend == "google":
+            return self._generate_with_images_google(prompt, images, max_tokens)
+        elif self.backend == "openai":
+            return self._generate_with_images_openai(prompt, images, max_tokens)
+        else:
+            # Fallback: transformers backend doesn't support vision; use text-only
+            logging.warning("Vision mode not supported for %s backend; falling back to text-only", self.backend)
+            return self.generate(prompt, max_tokens)
+
+    def _generate_with_images_google(self, prompt: str, images: list, max_tokens: int) -> str:
+        """Generate with Google Gemini Vision API."""
+        url = f"{self.google_api_base}/models/{self.google_model}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "X-goog-api-key": self.google_api_key,
+        }
+        
+        # Build parts: first add images, then the text prompt
+        parts = []
+        
+        # Add images as inline_data
+        for img in images:
+            base64_data = ImageHandler.encode_image_for_google(img)
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": base64_data
+                }
+            })
+        
+        # Add the text prompt
+        parts.append({"text": prompt})
+        
+        payload = {
+            "contents": [{"parts": parts}]
+        }
+        
+        response = self.client.post(url, headers=headers, json=payload, timeout=300)
+        response.raise_for_status()
+        data = response.json()
+        return self._parse_google_response(data)
+
+    def _generate_with_images_openai(self, prompt: str, images: list, max_tokens: int) -> str:
+        """Generate with OpenAI Vision API."""
+        # Build content array with images and text
+        content = []
+        
+        # Add images
+        for img in images:
+            base64_data = ImageHandler.encode_image_for_openai(img)
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_data}",
+                    "detail": "high"
+                }
+            })
+        
+        # Add text prompt
+        content.append({
+            "type": "text",
+            "text": prompt
+        })
+        
+        response = self.client.ChatCompletion.create(
+            model=self.model_name or "gpt-4-vision-preview",
+            messages=[{"role": "user", "content": content}],
+            max_tokens=max_tokens,
+            temperature=0.6,
+        )
+        return response.choices[0].message.content.strip()
