@@ -227,7 +227,3 @@ Key options exposed by `src/agent.py`:
 ## Contributing
 
 Small improvements and cleanup contributions are welcome. Please open an issue or pull request with a clear summary of the problem, the proposed change, and any verification steps.
-
-## License
-
-No license file is included yet. Add a project license before publishing publicly if you want others to reuse or redistribute the code.
