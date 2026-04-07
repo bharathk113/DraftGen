@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -132,33 +133,93 @@ Ensure all findings from the visual materials are properly incorporated into the
 Do not include any explanation outside the JSON object.
 """
 
+SLIDE_REVISION_PROMPT = """You are a helpful assistant that revises slide outlines in JSON format.
+
+Original user request:
+{user_request}
+
+Available Images:
+{image_descriptions}
+
+Original generated JSON:
+{original_json}
+
+Suggestion:
+{suggestion}
+
+Update the JSON object to incorporate the suggestion. Preserve the existing JSON structure with the key `slides` and slide fields `title`, `bullets`, optional `notes`, and optional `images`.
+
+Return only the revised JSON object. Do not include any explanation outside the JSON object.
+"""
+
+REPORT_REVISION_PROMPT = """You are a helpful assistant that revises report content in JSON format.
+
+Original user request:
+{user_request}
+
+Available Images:
+{image_descriptions}
+
+Original generated JSON:
+{original_json}
+
+Suggestion:
+{suggestion}
+
+Update the JSON object to incorporate the suggestion. Preserve the existing JSON structure with keys `title` and `sections`, where each section includes `heading`, `content`, and optional `images`.
+
+Return only the revised JSON object. Do not include any explanation outside the JSON object.
+"""
+
+
+def _extract_json_candidates(raw_text):
+    text = raw_text.strip()
+    if text:
+        yield text
+
+    for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text, re.IGNORECASE):
+        candidate = match.group(1).strip()
+        if candidate:
+            yield candidate
+
+    decoder = json.JSONDecoder()
+    for i, char in enumerate(raw_text):
+        if char not in "[{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(raw_text[i:])
+        except json.JSONDecodeError:
+            continue
+        yield raw_text[i:i + end].strip()
+
 
 def parse_json_output(raw_text):
-    # First, try to extract from ```json code block
-    import re
-    json_match = re.search(r'```json\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
-    if json_match:
+    for candidate in _extract_json_candidates(raw_text):
         try:
-            return json.loads(json_match.group(1))
+            return json.loads(candidate)
         except json.JSONDecodeError:
-            pass
-
-    # Fallback: try the whole text
-    try:
-        return json.loads(raw_text.strip())
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback: find first { to last }
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(raw_text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
+            continue
 
     raise ValueError("Unable to parse JSON response from LLM")
+
+
+def normalize_revision_result(kind, parsed_json):
+    if kind == "slides":
+        if isinstance(parsed_json, list):
+            return parsed_json
+        if isinstance(parsed_json, dict) and isinstance(parsed_json.get("slides"), list):
+            return parsed_json["slides"]
+        raise ValueError("Revised slide JSON must be a list or an object with a `slides` key")
+
+    if isinstance(parsed_json, dict):
+        return parsed_json
+    raise ValueError("Revised report JSON must be an object")
+
+
+def format_json_for_revision(kind, content_json):
+    if kind == "slides":
+        return {"slides": content_json}
+    return content_json
 
 
 def create_image_descriptions(extracted_images):
@@ -167,6 +228,85 @@ def create_image_descriptions(extracted_images):
         desc = f"Image {i}: {img.get_description()}"
         descriptions.append(desc)
     return "\n".join(descriptions)
+
+
+def read_multiline_input(prompt_text):
+    print(prompt_text)
+    print("Enter your suggestion. Submit an empty line to finish.")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if not line.strip():
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def revise_json_with_suggestion(kind, original_json, prompt_template, user_request, suggestion, image_descriptions, extracted_images, llm_client, max_tokens):
+    original_json_text = json.dumps(format_json_for_revision(kind, original_json), indent=2)
+    prompt = prompt_template.format(
+        user_request=user_request,
+        image_descriptions=image_descriptions,
+        original_json=original_json_text,
+        suggestion=suggestion,
+    )
+    if extracted_images and llm_client.backend in {"google", "openai"}:
+        images_to_send = [img.image for img in extracted_images]
+        result_text = llm_client.generate_with_images(prompt, images_to_send, max_tokens=max_tokens)
+    else:
+        result_text = llm_client.generate(prompt, max_tokens=max_tokens)
+    return normalize_revision_result(kind, parse_json_output(result_text))
+
+
+def interactive_revision_loop(kind, original_json, user_request, extracted_images, llm_client, max_tokens, max_rounds=3):
+    image_descriptions = create_image_descriptions(extracted_images) if extracted_images else ""
+    current_json = original_json
+
+    for round_index in range(1, max_rounds + 1):
+        print(f"\n--- Interactive revision round {round_index} for {kind} ---")
+        print(json.dumps(current_json, indent=2))
+
+        suggestion = read_multiline_input(
+            f"Provide suggestions to improve the generated {kind}."  # noqa: E501
+        )
+        if not suggestion or suggestion.lower() in {"done", "no", "none", "no changes"}:
+            print(f"No more suggestions for {kind}. Using current output.")
+            break
+
+        try:
+            if kind == "slides":
+                current_json = revise_json_with_suggestion(
+                    kind,
+                    current_json,
+                    SLIDE_REVISION_PROMPT,
+                    user_request,
+                    suggestion,
+                    image_descriptions,
+                    extracted_images,
+                    llm_client,
+                    max_tokens,
+                )
+            else:
+                current_json = revise_json_with_suggestion(
+                    kind,
+                    current_json,
+                    REPORT_REVISION_PROMPT,
+                    user_request,
+                    suggestion,
+                    image_descriptions,
+                    extracted_images,
+                    llm_client,
+                    max_tokens,
+                )
+        except ValueError as exc:
+            logging.warning("Could not apply interactive revision for %s: %s", kind, exc)
+            print(f"Revision could not be applied for {kind}: {exc}")
+            print("Keeping the current output and continuing.")
+
+    return current_json
 
 
 def build_slides_content(document_text, extracted_images, user_request, llm_client, max_slides):
@@ -304,6 +444,8 @@ def main():
     parser.add_argument("--backend", choices=["auto", "openai", "google", "transformers"], default="auto", help="LLM backend to use")
     parser.add_argument("--model-name", help="Optional model name for the transformer or Google backend")
     parser.add_argument("--image-mode", choices=["off", "ocr", "auto"], default="auto", help="How to handle embedded images: off (ignore), auto (use vision API if available), ocr (legacy: same as auto)")
+    parser.add_argument("--interactive", action="store_true", help="Enable interactive review after initial generation")
+    parser.add_argument("--interactive-rounds", type=int, default=3, help="Maximum number of interactive revision rounds")
     args = parser.parse_args()
     mode = args.mode
     if mode == "slides" and "--mode" not in sys.argv and any(arg.startswith("--report-request") for arg in sys.argv):
@@ -345,6 +487,19 @@ def main():
 
     if mode in {"slides", "both"}:
         slides = build_slides_content(document_text, extracted_images, args.slide_request, llm_client, args.max_slides)
+        if args.interactive:
+            slides = interactive_revision_loop(
+                "slides",
+                slides,
+                args.slide_request,
+                extracted_images,
+                llm_client,
+                max_tokens=1000000,
+                max_rounds=args.interactive_rounds,
+            )
+        if len(slides) > args.max_slides:
+            logging.info("Truncating slides from %d to %d after interactive revision", len(slides), args.max_slides)
+            slides = slides[: args.max_slides]
         logging.info("Parsed slides: %s", json.dumps(slides, indent=2))
         builder = PresentationBuilder(template_path=args.template)
         builder.build_from_outline(slides, extracted_images)
@@ -353,6 +508,16 @@ def main():
 
     if mode in {"report", "both"}:
         report = build_report_content(document_text, extracted_images, args.report_request, llm_client)
+        if args.interactive:
+            report = interactive_revision_loop(
+                "report",
+                report,
+                args.report_request,
+                extracted_images,
+                llm_client,
+                max_tokens=4096,
+                max_rounds=args.interactive_rounds,
+            )
         report_builder = ReportBuilder()
         report_builder.build(report, args.output_docx, extracted_images)
         logging.info("Generated report: %s", args.output_docx)
